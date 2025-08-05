@@ -1,0 +1,7 @@
+services:
+  - type: web
+    name: listing-audit-backend
+    runtime: python
+    buildCommand: ""
+    startCommand: "python main.py"
+    plan: free
