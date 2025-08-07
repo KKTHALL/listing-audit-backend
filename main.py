@@ -32,6 +32,30 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/103 Safari/537.36"
 }
 
+# Simple in-memory rate limiting to prevent abuse of the free audit endpoint.
+# This dictionary maps client IP addresses to the number of audits performed.
+# When the count exceeds MAX_AUDITS_PER_IP, the API returns a 429 status and a
+# message instructing the user to contact the business for additional audits.
+audit_counts = {}
+MAX_AUDITS_PER_IP = 3
+
+@app.before_request
+def limit_audit_requests():
+    # Only rate limit the audit endpoint on POST requests
+    if request.endpoint == 'audit' and request.method == 'POST':
+        ip = request.remote_addr or 'unknown'
+        count = audit_counts.get(ip, 0)
+        if count >= MAX_AUDITS_PER_IP:
+            return (
+                jsonify(
+                    success=False,
+                    message="Free audit limit exceeded. Please contact us for additional audits.",
+                ),
+                429,
+            )
+        # Increment the count for this IP
+        audit_counts[ip] = count + 1
+
 
 def extract_amazon_listing_details(asin: str):
     """Scrape basic listing details from an Amazon product page."""
@@ -95,47 +119,94 @@ def analyze_reviews_sentiment(reviews):
 
 
 def audit_amazon_content(details: dict, reviews: list):
-    """Generate a simple audit report for an Amazon listing."""
+    """Generate a detailed audit report for an Amazon listing.
+
+    This function analyzes the scraped details and reviews to generate
+    meaningful, prioritized suggestions. The report highlights the most
+    impactful improvements a seller can make to boost conversion and
+    customer satisfaction.
+    """
     avg_sent = analyze_reviews_sentiment(reviews)
     sentiment_summary = (
         "positive" if avg_sent > 0.2 else "neutral" if avg_sent > -0.2 else "negative"
     )
-    listing_score = random.randint(50, 90)
+    # Start with a perfect score and deduct points for each issue.
+    listing_score = 100
     recommendations = []
     title = details['title']
     bullets = details['bullets']
     description = details['description']
     images = details['images']
 
-    # Title suggestions
-    if not title or len(title) < 50:
+    # Title analysis
+    if not title:
+        recommendations.append("Title is missing. Add a descriptive title including key features and benefits.")
+        listing_score -= 25
+    else:
+        title_length = len(title)
+        if title_length < 50:
+            recommendations.append(
+                f"Your title is only {title_length} characters. Aim for 60–80 characters and include relevant keywords."
+            )
+            listing_score -= 10
+        elif title_length > 200:
+            recommendations.append(
+                "Your title is very long. Shorten it to under 200 characters for better readability."
+            )
+            listing_score -= 5
+
+    # Bullet point analysis
+    num_bullets = len(bullets)
+    if num_bullets == 0:
+        recommendations.append("No bullet points found. Add 5 concise bullet points highlighting key product benefits.")
+        listing_score -= 20
+    elif num_bullets < 5:
+        recommendations.append(f"Only {num_bullets} bullet points detected. Aim for 5 bullet points with specific features and benefits.")
+        listing_score -= 10
+    else:
+        for idx, bullet in enumerate(bullets[:5], start=1):
+            if len(bullet.split()) < 7:
+                recommendations.append(
+                    f"Bullet {idx} is too short. Expand it to clearly describe the feature or benefit."
+                )
+                listing_score -= 2
+
+    # Description analysis
+    if not description:
+        recommendations.append("Description is missing. Add a detailed description covering product benefits, usage, and brand story.")
+        listing_score -= 25
+    elif len(description) < 150:
         recommendations.append(
-            "Improve title with relevant keywords and more detail."
+            "Your product description is quite short. Expand it to at least 150 words to address customer questions and concerns."
         )
-    # Bullet points suggestions
-    if len(bullets) < 5:
+        listing_score -= 10
+
+    # Image analysis
+    num_images = len(images)
+    if num_images == 0:
+        recommendations.append("No images found. Add high-quality product images showing multiple angles and lifestyle context.")
+        listing_score -= 20
+    elif num_images < 3:
         recommendations.append(
-            "Add more detailed bullet points highlighting product features."
+            f"Only {num_images} images detected. Include at least 3 high-resolution images with different angles and use cases."
         )
-    # Description suggestions
-    if not description or len(description) < 100:
-        recommendations.append(
-            "Expand the product description to address customer concerns."
-        )
-    # Images suggestions
-    if len(images) < 3:
-        recommendations.append(
-            "Add high-quality images showing different angles of the product."
-        )
-    # Sentiment-based suggestion
-    if avg_sent < 0:
-        recommendations.append(
-            "Address negative reviews by improving product quality and shipping."
-        )
-    # General services suggestions
+        listing_score -= 10
+
+    # Review sentiment analysis
+    if avg_sent < -0.2:
+        recommendations.append("Customer reviews are mostly negative. Investigate common complaints and address them in the listing and product improvements.")
+        listing_score -= 15
+    elif avg_sent < 0.2:
+        recommendations.append("Customer sentiment is mixed. Highlight positive feedback in the description and address common issues in the Q&A section.")
+        listing_score -= 5
+
+    # General improvement recommendations
     recommendations.append(
-        "Consider services like SEO optimization, A+ content design, review management, image enhancement, competitor benchmarking, backend keyword optimization, and PPC audit."
+        "Consider professional services: keyword research & SEO, A+ content design, enhanced brand content, review management, image enhancement, competitor benchmarking, backend keyword optimization, and PPC audit."
     )
+
+    # Ensure the score is within 0–100
+    listing_score = max(0, min(100, listing_score))
 
     return {
         "listing_score": listing_score,
@@ -174,22 +245,43 @@ def fetch_shopify_details(url: str):
 
 
 def audit_shopify_content(title: str, description: str, images: list):
-    """Generate a simple audit report for a Shopify product."""
-    listing_score = random.randint(50, 90)
+    """Generate a detailed audit report for a Shopify product.
+
+    The report highlights important improvements a merchant can make to
+    increase conversion and trust on their product page.
+    """
+    listing_score = 100
     recommendations = []
     if not title:
-        recommendations.append("Add a clear product title.")
-    if not description or len(description) < 100:
+        recommendations.append("Product title is missing. Add a clear, concise title with keywords.")
+        listing_score -= 25
+    elif len(title) < 50:
         recommendations.append(
-            "Add detailed product description with features and benefits."
+            f"Product title is only {len(title)} characters. Consider adding more detail and relevant keywords."
         )
-    if len(images) < 3:
+        listing_score -= 10
+
+    if not description:
+        recommendations.append("Description is missing. Provide a thorough description covering features, benefits, and usage.")
+        listing_score -= 25
+    elif len(description) < 150:
         recommendations.append(
-            "Add high-quality images to showcase the product."
+            "Description is brief. Expand it to at least 150 words to improve SEO and answer customer questions."
         )
+        listing_score -= 10
+
+    num_images = len(images)
+    if num_images == 0:
+        recommendations.append("No images found. Add multiple high-quality images showing the product from various angles.")
+        listing_score -= 20
+    elif num_images < 3:
+        recommendations.append(f"Only {num_images} image(s) found. Include at least 3 images, including lifestyle shots and close-ups.")
+        listing_score -= 10
+
     recommendations.append(
-        "Consider optimizing SEO, improving product images, adding customer reviews, and refining descriptions."
+        "Enhance your listing further by optimizing SEO keywords, using professional product photography, adding customer reviews or testimonials, and refining descriptions with storytelling."
     )
+    listing_score = max(0, min(100, listing_score))
     return {
         "listing_score": listing_score,
         "sentiment_summary": "",
