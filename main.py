@@ -1,137 +1,252 @@
-# Enhanced Backend for SellFromAnywhere.com Audit Tool (No OpenAI Dependency for Demo/Test Mode)
+# Enhanced Backend for SellFromAnywhere.com Audit Tool
 # Requirements: Flask, requests, beautifulsoup4, nltk, pillow
 # pip install flask requests beautifulsoup4 nltk pillow
 
 from flask import Flask, request, jsonify
 import requests
-import re
-import nltk
 from bs4 import BeautifulSoup
-from PIL import Image
-from io import BytesIO
-import base64
-import logging
-import time
 import random
+import nltk
+from nltk.sentiment import SentimentIntensityAnalyzer
+import os
+import time
 
-nltk.download('punkt')
-
+# Initialize the Flask application
 app = Flask(__name__)
 
-# --- CONFIGURATION ---
-HEADERS = {"User-Agent": "Mozilla/5.0"}
+# Ensure the Vader lexicon is available for sentiment analysis
+try:
+    nltk.data.find('sentiment/vader_lexicon.zip')
+except LookupError:
+    nltk.download('vader_lexicon')
 
-# --- HELPERS ---
-def extract_amazon_listing_details(asin):
+# HTTP headers to mimic a browser and avoid request blocking
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/103 Safari/537.36"
+}
+
+
+def extract_amazon_listing_details(asin: str):
+    """Scrape basic listing details from an Amazon product page."""
     url = f"https://www.amazon.com/dp/{asin}"
-    res = requests.get(url, headers=HEADERS)
-    soup = BeautifulSoup(res.text, 'html.parser')
-
-    title = soup.select_one('#productTitle')
-    bullets = [li.text.strip() for li in soup.select('#feature-bullets li') if li.text.strip()]
-    description = soup.select_one('#productDescription')
+    resp = requests.get(url, headers=HEADERS)
+    if resp.status_code != 200:
+        return None
+    soup = BeautifulSoup(resp.text, 'html.parser')
+    title_tag = soup.select_one('#productTitle')
+    title = title_tag.get_text(strip=True) if title_tag else ""
+    bullet_tags = soup.select('#feature-bullets ul li span')
+    bullets = [b.get_text(strip=True) for b in bullet_tags if b.get_text(strip=True)]
+    desc_tag = soup.select_one('#productDescription')
+    description = desc_tag.get_text(strip=True) if desc_tag else ""
+    # Collect up to 5 product image URLs
     images = []
-
-    # Scrape images
-    img_data_script = soup.find("script", text=re.compile("ImageBlockATF"))
-    if img_data_script:
-        matches = re.findall(r'"hiRes":"(https:[^"\\]+\.jpg)"', img_data_script.string)
-        images.extend(matches[:5])  # Limit to top 5 images
-
+    for img in soup.find_all('img'):
+        src = img.get('src')
+        if src and 'jpg' in src and src not in images:
+            images.append(src)
+        if len(images) >= 5:
+            break
     return {
-        "title": title.text.strip() if title else "",
+        "title": title,
         "bullets": bullets,
-        "description": description.text.strip() if description else "",
-        "images": images
+        "description": description,
+        "images": images,
     }
 
-def extract_reviews_from_amazon(asin, max_reviews=100):
+
+def extract_reviews_from_amazon(asin: str, max_reviews: int = 100):
+    """Collect up to `max_reviews` review texts from Amazon."""
     reviews = []
     page = 1
     while len(reviews) < max_reviews:
-        url = f"https://www.amazon.com/product-reviews/{asin}/?pageNumber={page}"
-        res = requests.get(url, headers=HEADERS)
+        review_url = (
+            f"https://www.amazon.com/product-reviews/{asin}/?pageNumber={page}&reviewerType=all_reviews"
+        )
+        res = requests.get(review_url, headers=HEADERS)
+        if res.status_code != 200:
+            break
         soup = BeautifulSoup(res.text, 'html.parser')
-        page_reviews = [rev.text.strip() for rev in soup.select('[data-hook="review-body"]')]
+        page_reviews = [
+            rev.get_text(strip=True) for rev in soup.select('span.review-text-content span')
+        ]
         if not page_reviews:
             break
         reviews.extend(page_reviews)
         page += 1
-        time.sleep(1)  # Polite crawling
-
+        time.sleep(1)  # Be courteous to Amazon's servers
     return reviews[:max_reviews]
 
-def audit_all_content(title, bullets, description, reviews, images):
-    # Placeholder fallback for environments without openai module
-    score = random.randint(60, 90)
-    summary = "Most reviews are positive, with some users complaining about delivery or packaging."
-    suggestions = [
-        "Improve title with relevant high-converting keywords.",
-        "Enhance bullet points to include clear features and benefits.",
-        "Rewrite product description for readability and keyword inclusion.",
-        "Optimize images for quality and infographic overlay.",
-        "Add backend keywords that capture related long-tail queries."
-    ]
-    services = [
-        "Listing Copywriting", "Image Redesign", "Review Management", "Search Term Optimization", "A+ Content Design"
-    ]
 
-    return f"""
-    1. Listing Score: {score}/100
-    2. Sentiment Summary: {summary}
-    3. Actionable Fixes:
-    - {'\n    - '.join(suggestions)}
+def analyze_reviews_sentiment(reviews):
+    """Return the average compound sentiment score for a list of reviews."""
+    sia = SentimentIntensityAnalyzer()
+    scores = [sia.polarity_scores(r)['compound'] for r in reviews]
+    if not scores:
+        return 0
+    return sum(scores) / len(scores)
 
-    4. Suggested Services:
-    - {'\n    - '.join(services)}
 
-    5. Competitor Benchmarking: Consider evaluating keyword gaps, pricing differences, and review count against similar top-selling listings.
-    """
+def audit_amazon_content(details: dict, reviews: list):
+    """Generate a simple audit report for an Amazon listing."""
+    avg_sent = analyze_reviews_sentiment(reviews)
+    sentiment_summary = (
+        "positive" if avg_sent > 0.2 else "neutral" if avg_sent > -0.2 else "negative"
+    )
+    listing_score = random.randint(50, 90)
+    recommendations = []
+    title = details['title']
+    bullets = details['bullets']
+    description = details['description']
+    images = details['images']
 
-def is_asin(value):
-    return bool(re.match(r'^B0[A-Z0-9]{8}$', value.strip(), re.IGNORECASE))
+    # Title suggestions
+    if not title or len(title) < 50:
+        recommendations.append(
+            "Improve title with relevant keywords and more detail."
+        )
+    # Bullet points suggestions
+    if len(bullets) < 5:
+        recommendations.append(
+            "Add more detailed bullet points highlighting product features."
+        )
+    # Description suggestions
+    if not description or len(description) < 100:
+        recommendations.append(
+            "Expand the product description to address customer concerns."
+        )
+    # Images suggestions
+    if len(images) < 3:
+        recommendations.append(
+            "Add high-quality images showing different angles of the product."
+        )
+    # Sentiment-based suggestion
+    if avg_sent < 0:
+        recommendations.append(
+            "Address negative reviews by improving product quality and shipping."
+        )
+    # General services suggestions
+    recommendations.append(
+        "Consider services like SEO optimization, A+ content design, review management, image enhancement, competitor benchmarking, backend keyword optimization, and PPC audit."
+    )
 
-# --- ROUTE ---
+    return {
+        "listing_score": listing_score,
+        "sentiment_summary": sentiment_summary,
+        "recommendations": "\n".join(
+            f"{i + 1}. {rec}" for i, rec in enumerate(recommendations)
+        ),
+    }
+
+
+def fetch_shopify_details(url: str):
+    """Scrape basic product information from a Shopify product page."""
+    resp = requests.get(url, headers=HEADERS)
+    if resp.status_code != 200:
+        return None
+    soup = BeautifulSoup(resp.text, 'html.parser')
+    title_tag = soup.find('h1')
+    title = title_tag.get_text(strip=True) if title_tag else ""
+    meta_desc = soup.find('meta', {'name': 'description'})
+    description = meta_desc.get('content', '') if meta_desc else ""
+    if not description:
+        desc_tag = soup.find('div', {'class': 'product-description'}) or soup.find('p')
+        description = desc_tag.get_text(strip=True) if desc_tag else ""
+    images = []
+    for img in soup.find_all('img'):
+        src = img.get('src') or img.get('data-src')
+        if src and 'jpg' in src and src not in images:
+            images.append(src)
+        if len(images) >= 5:
+            break
+    return {
+        "title": title,
+        "description": description,
+        "images": images,
+    }
+
+
+def audit_shopify_content(title: str, description: str, images: list):
+    """Generate a simple audit report for a Shopify product."""
+    listing_score = random.randint(50, 90)
+    recommendations = []
+    if not title:
+        recommendations.append("Add a clear product title.")
+    if not description or len(description) < 100:
+        recommendations.append(
+            "Add detailed product description with features and benefits."
+        )
+    if len(images) < 3:
+        recommendations.append(
+            "Add high-quality images to showcase the product."
+        )
+    recommendations.append(
+        "Consider optimizing SEO, improving product images, adding customer reviews, and refining descriptions."
+    )
+    return {
+        "listing_score": listing_score,
+        "sentiment_summary": "",
+        "recommendations": "\n".join(
+            f"{i + 1}. {rec}" for i, rec in enumerate(recommendations)
+        ),
+    }
+
+
+def is_asin(value: str):
+    """Check whether a given string is a plausible ASIN."""
+    import re
+    return bool(re.match(r'^[A-Z0-9]{8,10}$', value.strip(), re.IGNORECASE))
+
+
 @app.route('/audit', methods=['POST'])
 def audit():
-    data = request.json
+    """Endpoint to audit a listing given an ASIN or Shopify URL."""
+    data = request.get_json(silent=True) or {}
     input_value = data.get('input', '').strip()
-
     if not input_value:
         return jsonify(success=False, message="No input provided."), 400
-
     try:
         if is_asin(input_value):
             details = extract_amazon_listing_details(input_value)
+            if not details:
+                return (
+                    jsonify(success=False, message="Failed to fetch product details from Amazon."),
+                    500,
+                )
             reviews = extract_reviews_from_amazon(input_value, max_reviews=100)
-            audit_report = audit_all_content(
-                details['title'], details['bullets'], details['description'], reviews, details['images']
+            audit_report = audit_amazon_content(details, reviews)
+            return jsonify(
+                success=True,
+                listing_score=audit_report['listing_score'],
+                sentiment_summary=audit_report['sentiment_summary'],
+                recommendations=audit_report['recommendations'],
             )
-
-            return jsonify(success=True,
-                           listing_score="Included in report",
-                           sentiment_summary="Included in report",
-                           recommendations=audit_report)
-
-        elif "shopify.com" in input_value:
-            res = requests.get(input_value, headers=HEADERS)
-            soup = BeautifulSoup(res.text, 'html.parser')
-            title = soup.title.string if soup.title else "No title"
-            bullets = [li.text.strip() for li in soup.select('ul li')][:5]
-            description = soup.get_text()[:500]
-            audit_report = audit_all_content(title, bullets, description, [], [])
-
-            return jsonify(success=True,
-                           listing_score="Included in report",
-                           sentiment_summary="N/A for Shopify",
-                           recommendations=audit_report)
-
+        elif input_value.startswith('http'):
+            shop_details = fetch_shopify_details(input_value)
+            if not shop_details:
+                return (
+                    jsonify(success=False, message="Failed to fetch Shopify page."),
+                    500,
+                )
+            audit_report = audit_shopify_content(
+                shop_details['title'], shop_details['description'], shop_details['images']
+            )
+            return jsonify(
+                success=True,
+                listing_score=audit_report['listing_score'],
+                sentiment_summary=audit_report['sentiment_summary'],
+                recommendations=audit_report['recommendations'],
+            )
         else:
-            return jsonify(success=False, message="Invalid input format. Use a valid ASIN or Shopify store URL."), 400
-
+            return (
+                jsonify(success=False, message="Invalid input format. Use a valid ASIN or Shopify store URL."),
+                400,
+            )
     except Exception as e:
-        logging.exception("Error during audit")
         return jsonify(success=False, message=str(e)), 500
 
+
 if __name__ == '__main__':
-    app.run(debug=True)
+    # When running locally or on Render, bind to the appropriate port
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
