@@ -3,6 +3,7 @@
 # pip install flask requests beautifulsoup4 nltk pillow
 
 from flask import Flask, request, jsonify
+from flask_cors import CORS
 import requests
 from bs4 import BeautifulSoup
 import random
@@ -13,6 +14,12 @@ import time
 
 # Initialize the Flask application
 app = Flask(__name__)
+
+# Enable Cross-Origin Resource Sharing (CORS) so that the frontend hosted on
+# sellfromanywhere.com can make requests to this backend without being blocked
+# by the browser's same-origin policy. In production you may want to restrict
+# the allowed origins to the domain(s) that will consume this API.
+CORS(app)
 
 # Ensure the Vader lexicon is available for sentiment analysis
 try:
